@@ -1,0 +1,12 @@
+{
+  "projectId": "1ceb3cea-9f82-4c1a-beb0-113bf5f750a5",
+  "hooks": {
+    "enabled": true,
+    "events": [
+      "SessionStart",
+      "SessionEnd",
+      "PreToolUse",
+      "PostToolUse"
+    ]
+  }
+}
