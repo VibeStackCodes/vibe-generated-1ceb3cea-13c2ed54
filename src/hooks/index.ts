@@ -35,5 +35,8 @@ export {
 // localStorage hooks
 export { useLocalStorage, useLoadLocalStorage } from './useLocalStorage'
 
+// Storage persistence hooks
+export { useStoragePersistence, useStorageDiagnostics } from './useStoragePersistence'
+
 // Type re-exports for convenience
 export type { TaskContextType } from '@/context/TaskContext'

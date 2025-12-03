@@ -1,320 +1,368 @@
 /**
- * Storage Persistence Hook Guide & Examples
- *
- * This file demonstrates how to use localStorage integration in QuietTask.
- * The integration is AUTOMATIC - you don't need to do anything!
- *
- * How it works:
- * 1. TaskProvider loads tasks from localStorage on app startup
- * 2. Any changes to tasks/lists are automatically persisted (with 500ms debounce)
- * 3. Page refresh preserves all data
- * 4. Works completely offline
- *
- * Storage Location: localStorage["quiettask_state"]
- * Storage Size: Varies based on data volume (auto-managed by browser)
+ * Advanced Storage Persistence Hook
+ * Provides comprehensive control over localStorage persistence with lifecycle management
+ * Features: auto-save, debouncing, manual save/load, backup recovery, diagnostics
  */
+
+import { useEffect, useCallback, useRef, useState } from 'react'
+import {
+  loadTaskState,
+  saveTaskState,
+  clearTaskState,
+  restoreFromBackup,
+  isLocalStorageAvailable,
+  getStorageStats,
+  getAvailableStorageSpace,
+  exportTasksAsJSON,
+  importTasksFromJSON,
+} from '@/utils/taskStorage'
+import type { Task, TaskList } from '@/types/task'
+
+interface StoragePersistenceOptions {
+  autoSync?: boolean
+  debounceMs?: number
+  enableDiagnostics?: boolean
+  onSyncError?: (error: Error) => void
+  onSyncSuccess?: () => void
+  maxRetries?: number
+}
+
+interface StoragePersistenceStats {
+  isSyncing: boolean
+  lastSyncTime?: Date
+  syncCount: number
+  errorCount: number
+  tasksCount: number
+  listsCount: number
+  storageSize: number
+  availableSpace: number
+}
 
 /**
- * ============================================================================
- * USAGE EXAMPLES
- * ============================================================================
+ * Advanced storage persistence hook for task state
+ * Handles automatic persistence with comprehensive error handling and diagnostics
  */
+export function useStoragePersistence(
+  tasks: Task[],
+  lists: TaskList[],
+  onLoad: (tasks: Task[], lists: TaskList[]) => void,
+  options: StoragePersistenceOptions = {}
+) {
+  const {
+    autoSync = true,
+    debounceMs = 500,
+    enableDiagnostics = false,
+    onSyncError,
+    onSyncSuccess,
+    maxRetries = 3,
+  } = options
+
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const isStorageAvailableRef = useRef(isLocalStorageAvailable())
+  const retryCountRef = useRef(0)
+
+  const [stats, setStats] = useState<StoragePersistenceStats>({
+    isSyncing: false,
+    syncCount: 0,
+    errorCount: 0,
+    tasksCount: 0,
+    listsCount: 0,
+    storageSize: 0,
+    availableSpace: 0,
+  })
+
+  /**
+   * Update stats
+   */
+  const updateStats = useCallback(() => {
+    if (!isStorageAvailableRef.current) return
+
+    const storageStats = getStorageStats()
+    const availableSpace = getAvailableStorageSpace()
+
+    setStats((prev) => ({
+      ...prev,
+      tasksCount: storageStats.tasksCount,
+      listsCount: storageStats.listsCount,
+      storageSize: storageStats.totalSize,
+      availableSpace,
+    }))
+  }, [])
+
+  /**
+   * Load initial state from localStorage on component mount
+   */
+  useEffect(() => {
+    if (!isStorageAvailableRef.current) {
+      console.warn('[useStoragePersistence] localStorage is not available')
+      return
+    }
+
+    try {
+      const loadedState = loadTaskState()
+      onLoad(loadedState.tasks, loadedState.lists)
+
+      if (enableDiagnostics) {
+        console.log('[useStoragePersistence] Loaded state:', loadedState)
+        updateStats()
+      }
+    } catch (error) {
+      console.error('[useStoragePersistence] Failed to load state:', error)
+      if (onSyncError && error instanceof Error) {
+        onSyncError(error)
+      }
+    }
+  }, [onLoad, enableDiagnostics, updateStats])
+
+  /**
+   * Setup debounced save function with retry logic
+   */
+  const debouncedSave = useCallback(() => {
+    if (!autoSync || !isStorageAvailableRef.current) return
+
+    // Clear existing timeout
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current)
+    }
+
+    timeoutRef.current = setTimeout(() => {
+      setStats((prev) => ({ ...prev, isSyncing: true }))
+
+      try {
+        saveTaskState({ tasks, lists })
+        retryCountRef.current = 0
+
+        setStats((prev) => ({
+          ...prev,
+          isSyncing: false,
+          lastSyncTime: new Date(),
+          syncCount: prev.syncCount + 1,
+        }))
+
+        if (enableDiagnostics) {
+          console.log('[useStoragePersistence] Successfully synced to storage')
+          updateStats()
+        }
+
+        onSyncSuccess?.()
+      } catch (error) {
+        console.error('[useStoragePersistence] Failed to save state:', error)
+
+        // Retry logic
+        if (retryCountRef.current < maxRetries) {
+          retryCountRef.current++
+          console.log(
+            `[useStoragePersistence] Retrying save (${retryCountRef.current}/${maxRetries})...`
+          )
+          debouncedSave()
+        } else {
+          setStats((prev) => ({
+            ...prev,
+            isSyncing: false,
+            errorCount: prev.errorCount + 1,
+          }))
+          if (onSyncError && error instanceof Error) {
+            onSyncError(error)
+          }
+        }
+      }
+    }, debounceMs)
+
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+    }
+  }, [tasks, lists, autoSync, debounceMs, enableDiagnostics, onSyncSuccess, onSyncError, maxRetries, updateStats])
+
+  /**
+   * Save to localStorage whenever tasks or lists change
+   */
+  useEffect(() => {
+    const cleanup = debouncedSave()
+    return cleanup
+  }, [debouncedSave])
+
+  /**
+   * Cleanup on unmount
+   */
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+    }
+  }, [])
+
+  /**
+   * Force immediate save without debounce
+   */
+  const forceSave = useCallback((): boolean => {
+    if (!isStorageAvailableRef.current) {
+      console.warn('[useStoragePersistence] localStorage is not available')
+      return false
+    }
+    try {
+      saveTaskState({ tasks, lists })
+      updateStats()
+      return true
+    } catch (error) {
+      console.error('[useStoragePersistence] Failed to save state:', error)
+      if (onSyncError && error instanceof Error) {
+        onSyncError(error)
+      }
+      return false
+    }
+  }, [tasks, lists, updateStats, onSyncError])
+
+  /**
+   * Force load from storage
+   */
+  const forceLoad = useCallback((): boolean => {
+    if (!isStorageAvailableRef.current) {
+      console.warn('[useStoragePersistence] localStorage is not available')
+      return false
+    }
+    try {
+      const loadedState = loadTaskState()
+      onLoad(loadedState.tasks, loadedState.lists)
+      updateStats()
+      return true
+    } catch (error) {
+      console.error('[useStoragePersistence] Failed to load state:', error)
+      if (onSyncError && error instanceof Error) {
+        onSyncError(error)
+      }
+      return false
+    }
+  }, [onLoad, updateStats, onSyncError])
+
+  /**
+   * Clear storage
+   */
+  const clear = useCallback((keepBackup: boolean = true): boolean => {
+    if (!isStorageAvailableRef.current) {
+      console.warn('[useStoragePersistence] localStorage is not available')
+      return false
+    }
+    try {
+      clearTaskState(keepBackup)
+      setStats((prev) => ({
+        ...prev,
+        tasksCount: 0,
+        listsCount: 0,
+        storageSize: 0,
+      }))
+      return true
+    } catch (error) {
+      console.error('[useStoragePersistence] Failed to clear state:', error)
+      if (onSyncError && error instanceof Error) {
+        onSyncError(error)
+      }
+      return false
+    }
+  }, [onSyncError])
+
+  /**
+   * Restore from backup
+   */
+  const restore = useCallback((): boolean => {
+    if (!isStorageAvailableRef.current) {
+      console.warn('[useStoragePersistence] localStorage is not available')
+      return false
+    }
+    try {
+      const success = restoreFromBackup()
+      if (success) {
+        const loadedState = loadTaskState()
+        onLoad(loadedState.tasks, loadedState.lists)
+        updateStats()
+      }
+      return success
+    } catch (error) {
+      console.error('[useStoragePersistence] Failed to restore:', error)
+      if (onSyncError && error instanceof Error) {
+        onSyncError(error)
+      }
+      return false
+    }
+  }, [onLoad, updateStats, onSyncError])
+
+  /**
+   * Export data as JSON
+   */
+  const exportAsJSON = useCallback((): string | null => {
+    try {
+      return exportTasksAsJSON({ tasks, lists })
+    } catch (error) {
+      console.error('[useStoragePersistence] Failed to export JSON:', error)
+      if (onSyncError && error instanceof Error) {
+        onSyncError(error)
+      }
+      return null
+    }
+  }, [tasks, lists, onSyncError])
+
+  /**
+   * Import data from JSON
+   */
+  const importFromJSON = useCallback((jsonString: string): boolean => {
+    try {
+      const imported = importTasksFromJSON(jsonString)
+      onLoad(imported.tasks, imported.lists)
+      return true
+    } catch (error) {
+      console.error('[useStoragePersistence] Failed to import JSON:', error)
+      if (onSyncError && error instanceof Error) {
+        onSyncError(error)
+      }
+      return false
+    }
+  }, [onLoad, onSyncError])
+
+  return {
+    stats,
+    forceSave,
+    forceLoad,
+    clear,
+    restore,
+    exportAsJSON,
+    importFromJSON,
+    isAvailable: isStorageAvailableRef.current,
+  }
+}
 
 /**
- * Example 1: Basic usage (no code needed!)
- *
- * import { useTask } from '@/hooks/useTask'
- *
- * function MyComponent() {
- *   const { state, actions } = useTask()
- *
- *   // Tasks are AUTOMATICALLY loaded from localStorage on mount
- *   // and saved whenever they change
- *
- *   const handleAddTask = () => {
- *     const task = actions.addTask({
- *       title: 'New Task',
- *       completed: false,
- *       priority: 'medium',
- *       listId: 'default',
- *       tags: [],
- *     })
- *     // Task is automatically persisted to localStorage
- *   }
- *
- *   return <div>{state.tasks.length} tasks</div>
- * }
+ * Hook for storage diagnostics and monitoring
  */
+export function useStorageDiagnostics() {
+  const [isAvailable, setIsAvailable] = useState(false)
+  const [stats, setStats] = useState(getStorageStats())
+  const [availableSpace, setAvailableSpace] = useState(0)
 
-/**
- * Example 2: Show loading state during initialization
- *
- * import { useTaskLoading } from '@/hooks/useTask'
- *
- * function MyComponent() {
- *   const isLoading = useTaskLoading()
- *
- *   if (isLoading) {
- *     return <div>Loading your tasks...</div>
- *   }
- *
- *   return <div>Tasks loaded!</div>
- * }
- */
+  useEffect(() => {
+    setIsAvailable(isLocalStorageAvailable())
+    setStats(getStorageStats())
+    setAvailableSpace(getAvailableStorageSpace())
+  }, [])
 
-/**
- * Example 3: Force immediate save (bypass debounce)
- *
- * import { useEffect } from 'react'
- * import { useTask } from '@/hooks/useTask'
- * import { saveTaskState } from '@/utils/taskStorage'
- *
- * function CriticalSave() {
- *   const { state } = useTask()
- *
- *   const handleCriticalOperation = async () => {
- *     // Do something important
- *
- *     // Force immediate save instead of waiting for debounce
- *     saveTaskState({ tasks: state.tasks, lists: state.lists })
- *   }
- *
- *   return <button onClick={handleCriticalOperation}>Critical Save</button>
- * }
- */
+  const refresh = useCallback(() => {
+    setIsAvailable(isLocalStorageAvailable())
+    setStats(getStorageStats())
+    setAvailableSpace(getAvailableStorageSpace())
+  }, [])
 
-/**
- * Example 4: Export tasks as backup
- *
- * import { useTask } from '@/hooks/useTask'
- * import { exportTasksAsJSON } from '@/utils/taskStorage'
- *
- * function ExportButton() {
- *   const { state } = useTask()
- *
- *   const handleExport = () => {
- *     const json = exportTasksAsJSON({
- *       tasks: state.tasks,
- *       lists: state.lists
- *     })
- *
- *     // Create download link
- *     const blob = new Blob([json], { type: 'application/json' })
- *     const url = URL.createObjectURL(blob)
- *     const link = document.createElement('a')
- *     link.href = url
- *     link.download = `tasks-backup-${Date.now()}.json`
- *     link.click()
- *   }
- *
- *   return <button onClick={handleExport}>Backup Tasks</button>
- * }
- */
+  const getUsagePercent = useCallback((): number => {
+    if (availableSpace === 0) return 0
+    const total = stats.totalSize + availableSpace
+    return (stats.totalSize / total) * 100
+  }, [stats.totalSize, availableSpace])
 
-/**
- * Example 5: Import tasks from backup
- *
- * import { importTasksFromJSON } from '@/utils/taskStorage'
- * import { useTask } from '@/hooks/useTask'
- *
- * function ImportButton() {
- *   const { actions } = useTask()
- *
- *   const handleImport = async (fileContent: string) => {
- *     try {
- *       const importedState = importTasksFromJSON(fileContent)
- *
- *       // Add imported tasks
- *       for (const task of importedState.tasks) {
- *         actions.addTask(task)
- *       }
- *
- *       // Add imported lists
- *       for (const list of importedState.lists) {
- *         actions.addList(list)
- *       }
- *     } catch (error) {
- *       console.error('Import failed:', error)
- *     }
- *   }
- *
- *   return <input type="file" accept=".json" onChange={(e) => {
- *     const file = e.target.files?.[0]
- *     if (file) {
- *       const reader = new FileReader()
- *       reader.onload = (event) => {
- *         handleImport(event.target?.result as string)
- *       }
- *       reader.readAsText(file)
- *     }
- *   }} />
- * }
- */
-
-/**
- * Example 6: Check storage stats
- *
- * import { getStorageStats } from '@/utils/taskStorage'
- *
- * function StorageStats() {
- *   const stats = getStorageStats()
- *
- *   return (
- *     <div>
- *       <p>Total Tasks: {stats.tasksCount}</p>
- *       <p>Total Lists: {stats.listsCount}</p>
- *       <p>Storage Used: {(stats.storageSize / 1024).toFixed(2)} KB</p>
- *     </div>
- *   )
- * }
- */
-
-/**
- * Example 7: Clear all data
- *
- * import { clearTaskState } from '@/utils/taskStorage'
- *
- * function ClearDataButton() {
- *   const handleClear = () => {
- *     if (confirm('Are you sure you want to delete all tasks?')) {
- *       clearTaskState()
- *       // Refresh page or reset state manually
- *       window.location.reload()
- *     }
- *   }
- *
- *   return <button onClick={handleClear}>Clear All Data</button>
- * }
- */
-
-/**
- * ============================================================================
- * STORAGE DETAILS
- * ============================================================================
- */
-
-/**
- * Storage Key: "quiettask_state"
- *
- * JSON Structure:
- * {
- *   "tasks": [
- *     {
- *       "id": "1234567890-abc123def",
- *       "title": "Task Title",
- *       "description": "Optional description",
- *       "completed": false,
- *       "priority": "medium",
- *       "dueDate": "2024-12-31T23:59:59.000Z",
- *       "createdAt": "2024-01-01T00:00:00.000Z",
- *       "updatedAt": "2024-01-01T00:00:00.000Z",
- *       "listId": "list-id",
- *       "tags": ["tag1", "tag2"],
- *       "recurrence": "none",
- *       "parentTaskId": undefined
- *     }
- *   ],
- *   "lists": [
- *     {
- *       "id": "list-1234567890",
- *       "title": "My List",
- *       "description": "List description",
- *       "color": "#FF6B35",
- *       "createdAt": "2024-01-01T00:00:00.000Z",
- *       "updatedAt": "2024-01-01T00:00:00.000Z",
- *       "taskCount": 5,
- *       "order": 0
- *     }
- *   ]
- * }
- */
-
-/**
- * ============================================================================
- * PERSISTENCE BEHAVIOR
- * ============================================================================
- */
-
-/**
- * AUTOMATIC INITIALIZATION:
- * - On app startup, TaskProvider loads saved state from localStorage
- * - If no saved state exists, starts with empty arrays
- * - Sets isLoading to true during load, false when complete
- *
- * AUTOMATIC PERSISTENCE:
- * - Every task/list change triggers a save to localStorage
- * - Save is debounced by 500ms to avoid excessive writes
- * - If multiple changes happen quickly, only one save occurs
- * - Save includes error handling and console logging
- *
- * OFFLINE BEHAVIOR:
- * - All operations work completely offline
- * - Changes are saved to localStorage immediately
- * - When online, no special sync needed (this is local-first)
- * - Perfect for PWA and offline-first applications
- */
-
-/**
- * ============================================================================
- * BROWSER STORAGE LIMITS
- * ============================================================================
- */
-
-/**
- * localStorage has these typical limits:
- * - Chrome: ~10MB per origin
- * - Firefox: ~10MB per origin
- * - Safari: ~5MB per origin
- * - IE: ~10MB per origin
- *
- * QuietTask tasks are very small (< 500 bytes each typically)
- * This means you can store 20,000+ tasks before hitting limits
- *
- * If storage limit is exceeded:
- * - Browser will throw QuotaExceededError
- * - TaskProvider catches and logs this error
- * - App continues functioning with in-memory state
- * - User should export and clear old data
- */
-
-/**
- * ============================================================================
- * MIGRATION & UPGRADE
- * ============================================================================
- */
-
-/**
- * Storage Version: 1
- *
- * Future migrations:
- * 1. loadTaskState() can handle version detection
- * 2. importTasksFromJSON() handles both versioned and unversioned data
- * 3. When format changes, update version number in exportTasksAsJSON()
- * 4. Add migration logic to handle old formats
- */
-
-/**
- * ============================================================================
- * DEBUGGING
- * ============================================================================
- */
-
-/**
- * To debug localStorage in the browser console:
- *
- * // View stored data
- * JSON.parse(localStorage.getItem('quiettask_state'))
- *
- * // Check storage size
- * new Blob([localStorage.getItem('quiettask_state')]).size + ' bytes'
- *
- * // Manually clear (WARNING: deletes all tasks!)
- * localStorage.removeItem('quiettask_state')
- *
- * // Get stats
- * const { getStorageStats } = await import('./utils/taskStorage')
- * getStorageStats()
- */
-
-// This file is for documentation only - no exports needed
-export {}
+  return {
+    isAvailable,
+    stats,
+    availableSpace,
+    usagePercent: getUsagePercent(),
+    refresh,
+  }
+}

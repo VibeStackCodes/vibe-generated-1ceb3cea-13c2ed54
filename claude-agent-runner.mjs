@@ -482,13 +482,13 @@ Execute the necessary file operations and code changes to complete this task.`;
             // Assistant messages may contain tool calls or execution details
             const contentStr = message.content 
               ? (typeof message.content === 'string' 
-                  ? message.content 
+                ? message.content 
                   : JSON.stringify(message.content, null, 2))
               : '';
-            if (contentStr.length > 1000) {
-              console.log(`[AgentScript] Assistant content (first 1000 chars):`, contentStr.substring(0, 1000) + '...');
-            } else {
-              console.log(`[AgentScript] Assistant content:`, contentStr);
+              if (contentStr.length > 1000) {
+                console.log(`[AgentScript] Assistant content (first 1000 chars):`, contentStr.substring(0, 1000) + '...');
+              } else {
+                console.log(`[AgentScript] Assistant content:`, contentStr);
             }
             // Check for tool calls in assistant message
             if (message.tool_calls || message.toolCalls) {

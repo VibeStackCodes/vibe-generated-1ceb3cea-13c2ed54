@@ -12,7 +12,18 @@ export {
   importTasksFromJSON,
   getStorageStats,
   createStorageSyncManager,
+  isLocalStorageAvailable,
+  getAvailableStorageSpace,
+  restoreFromBackup,
 } from './taskStorage'
+
+// App initialization
+export {
+  initializeApp,
+  logInitializationStatus,
+  canSyncToStorage,
+  getStorageUsageSummary,
+} from './appInitializer'
 
 // Task operations
 export { performTaskOperation } from './taskOperations'
@@ -67,6 +78,9 @@ export type {
   DerivedTaskState,
   ConflictResolution,
 } from '@/types/taskStateUtils'
+
+// Initialization types
+export type { InitializationStatus } from './appInitializer'
 
 // Utility type re-exports
 export type {
